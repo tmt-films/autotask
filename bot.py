@@ -346,6 +346,40 @@ class Database:
         conn.commit()
         conn.close()
 
+    def delete_job(self, job_id: int):
+        """Delete a job from the database"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute('DELETE FROM jobs WHERE id = ?', (job_id,))
+
+        conn.commit()
+        conn.close()
+
+    def update_job(self, job_id: int, job_data: dict):
+        """Update a job in the database"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute('''
+            UPDATE jobs SET
+                job_name = ?, source_channel_id = ?, target_channel_id = ?,
+                start_post_id = ?, end_post_id = ?, batch_size = ?,
+                recurring_time = ?, delete_time = ?, filter_type = ?,
+                custom_caption = ?, button_text = ?, button_url = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        ''', (
+            job_data['name'], job_data['source'], job_data['target'],
+            job_data['start_id'], job_data['end_id'], job_data['batch_size'],
+            job_data['recurring_time'], job_data['delete_time'], job_data['filter_type'],
+            job_data.get('caption', ''), job_data.get('button_text', ''),
+            job_data.get('button_url', ''), job_id
+        ))
+
+        conn.commit()
+        conn.close()
+
     # --- New method to track all users ---
     def add_user_if_not_exists(self, user_id: int):
         """Add a user to the users table if they don't already exist."""
@@ -745,11 +779,12 @@ Bot must be admin in both channels. Use message links for start/end posts."""
         """Handle job name input"""
         job_name = message.text.strip()
         
-        if len(job_name) < 3:
-            await message.reply_text("❌ Job name must be at least 3 characters long.")
-            return
+        if job_name.lower() != 'skip':
+            if len(job_name) < 3:
+                await message.reply_text("❌ Job name must be at least 3 characters long.")
+                return
+            state["job_name"] = job_name
         
-        state["job_name"] = job_name
         state["step"] = "source_channel"
         self.db.save_user_state(message.from_user.id, state)
         
@@ -764,11 +799,26 @@ You can send:
 ⚠️ <b>Important:</b> Make sure the bot is admin in this channel!
         """
         
+        if 'editing_job_id' in state:
+            text += f"\nOr send `skip` to keep the current source channel: <code>{state['source_channel']}</code>"
+
         await message.reply_text(text, parse_mode=enums.ParseMode.HTML)
     
     async def handle_source_channel(self, client: Client, message: Message, state: dict):
         """Handle source channel input"""
         channel_input = message.text.strip()
+
+        if channel_input.lower() == 'skip' and 'editing_job_id' in state:
+            state["step"] = "target_channel"
+            self.db.save_user_state(message.from_user.id, state)
+            text = f"""✅ Source channel kept as <code>{state['source_channel']}</code>.
+
+<b>Step 3:</b> Enter the target channel ID or username.
+Or send `skip` to keep the current target channel: <code>{state['target_channel']}</code>
+            """
+            await message.reply_text(text, parse_mode=enums.ParseMode.HTML)
+            return
+
         channel_id = self.extract_channel_id(channel_input)
         
         if not channel_id:
@@ -824,6 +874,8 @@ This is where the posts will be forwarded to.
 
 ⚠️ <b>Important:</b> Make sure the bot is admin in this channel too!
             """
+                if 'editing_job_id' in state:
+                    text += f"\nOr send `skip` to keep the current target channel: <code>{state['target_channel']}</code>"
             
                 await progress_msg.edit_text(text, parse_mode=enums.ParseMode.HTML)
         
@@ -834,6 +886,22 @@ This is where the posts will be forwarded to.
     async def handle_target_channel(self, client: Client, message: Message, state: dict):
         """Handle target channel input"""
         channel_input = message.text.strip()
+
+        if channel_input.lower() == 'skip' and 'editing_job_id' in state:
+            # Show filter selection
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("📷 Media Only", callback_data="filter_media")],
+                [InlineKeyboardButton("📝 Text Only", callback_data="filter_text")],
+                [InlineKeyboardButton("📋 All Posts", callback_data="filter_all")]
+            ])
+            text = f"""✅ Target channel kept as <code>{state['target_channel']}</code>.
+
+<b>Step 4:</b> Choose what type of posts to forward.
+Or send `skip` to keep the current filter: <code>{state['filter_type']}</code>
+            """
+            await message.reply_text(text, reply_markup=keyboard, parse_mode=enums.ParseMode.HTML)
+            return
+
         channel_id = self.extract_channel_id(channel_input)
         
         if not channel_id:
@@ -892,6 +960,8 @@ This is where the posts will be forwarded to.
 
 <b>Step 4:</b> Choose what type of posts to forward:
             """
+                if 'editing_job_id' in state:
+                    text += f"\nOr send `skip` to keep the current filter: <code>{state['filter_type']}</code>"
             
                 await progress_msg.edit_text(
                     text,
@@ -926,12 +996,26 @@ Example: <code>https://t.me/channelname/123</code>
 
 This will be your starting point for forwarding.
         """
+        if 'editing_job_id' in state:
+            text += f"\nOr send `skip` to keep the current start post: <code>{state['start_post_id']}</code>"
         
         await callback_query.edit_message_text(text, parse_mode=enums.ParseMode.HTML)
     
     async def handle_start_post(self, client: Client, message: Message, state: dict):
         """Handle start post link"""
         post_link = message.text.strip()
+
+        if post_link.lower() == 'skip' and 'editing_job_id' in state:
+            state["step"] = "end_post"
+            self.db.save_user_state(message.from_user.id, state)
+            text = f"""✅ Start post kept as <code>{state['start_post_id']}</code>.
+
+<b>Step 6:</b> Send the link of the LAST post to forward.
+Or send `skip` to keep the current end post: <code>{state['end_post_id']}</code>
+            """
+            await message.reply_text(text, parse_mode=enums.ParseMode.HTML)
+            return
+
         message_id = self.extract_message_id_from_link(post_link)
         
         if not message_id:
@@ -949,12 +1033,25 @@ Example: <code>https://t.me/channelname/456</code>
 
 This sets the range of posts to forward. You can use a very high number (like 999999) to include all future posts.
         """
+        if 'editing_job_id' in state:
+            text += f"\nOr send `skip` to keep the current end post: <code>{state['end_post_id']}</code>"
         
         await message.reply_text(text, parse_mode=enums.ParseMode.HTML)
     
     async def handle_end_post(self, client: Client, message: Message, state: dict):
         """Handle end post link"""
         post_link = message.text.strip()
+
+        if post_link.lower() == 'skip' and 'editing_job_id' in state:
+            state["step"] = "batch_size"
+            self.db.save_user_state(message.from_user.id, state)
+            text = f"""✅ End post kept as <code>{state['end_post_id']}</code>.
+
+<b>Step 7:</b> Enter batch size (1-20).
+Or send `skip` to keep the current batch size: <code>{state['batch_size']}</code>
+            """
+            await message.reply_text(text, parse_mode=enums.ParseMode.HTML)
+            return
         
         # Allow "latest" or "all" as shortcuts for high number
         if post_link.lower() in ["latest", "all", "999999"]:
@@ -981,13 +1078,28 @@ This sets the range of posts to forward. You can use a very high number (like 99
 This is how many posts will be forwarded in each cycle.
 Example: <code>5</code>
         """
+        if 'editing_job_id' in state:
+            text += f"\nOr send `skip` to keep the current batch size: <code>{state['batch_size']}</code>"
         
         await message.reply_text(text, parse_mode=enums.ParseMode.HTML)
     
     async def handle_batch_size(self, client: Client, message: Message, state: dict):
         """Handle batch size input"""
+        batch_size_input = message.text.strip()
+
+        if batch_size_input.lower() == 'skip' and 'editing_job_id' in state:
+            state["step"] = "recurring_time"
+            self.db.save_user_state(message.from_user.id, state)
+            text = f"""✅ Batch size kept as <code>{state['batch_size']}</code>.
+
+<b>Step 8:</b> Enter recurring time in minutes (1-1440).
+Or send `skip` to keep the current recurring time: <code>{state['recurring_time']}</code>
+            """
+            await message.reply_text(text, parse_mode=enums.ParseMode.HTML)
+            return
+
         try:
-            batch_size = int(message.text.strip())
+            batch_size = int(batch_size_input)
             if batch_size < 1 or batch_size > 20:
                 raise ValueError()
         except ValueError:
@@ -1004,13 +1116,28 @@ Example: <code>5</code>
 This is how often the bot will forward a new batch.
 Example: <code>30</code> (every 30 minutes)
         """
+        if 'editing_job_id' in state:
+            text += f"\nOr send `skip` to keep the current recurring time: <code>{state['recurring_time']}</code>"
         
         await message.reply_text(text, parse_mode=enums.ParseMode.HTML)
     
     async def handle_recurring_time(self, client: Client, message: Message, state: dict):
         """Handle recurring time input"""
+        recurring_time_input = message.text.strip()
+
+        if recurring_time_input.lower() == 'skip' and 'editing_job_id' in state:
+            state["step"] = "delete_time"
+            self.db.save_user_state(message.from_user.id, state)
+            text = f"""✅ Recurring time kept as <code>{state['recurring_time']}</code>.
+
+<b>Step 9:</b> Enter delete time in minutes (0-10080).
+Or send `skip` to keep the current delete time: <code>{state['delete_time']}</code>
+            """
+            await message.reply_text(text, parse_mode=enums.ParseMode.HTML)
+            return
+
         try:
-            recurring_time = int(message.text.strip())
+            recurring_time = int(recurring_time_input)
             if recurring_time < 1 or recurring_time > 1440:
                 raise ValueError()
         except ValueError:
@@ -1028,13 +1155,28 @@ This is how long to keep forwarded posts before deleting them.
 Use <code>0</code> to never delete posts.
 Example: <code>60</code> (delete after 1 hour)
         """
+        if 'editing_job_id' in state:
+            text += f"\nOr send `skip` to keep the current delete time: <code>{state['delete_time']}</code>"
         
         await message.reply_text(text, parse_mode=enums.ParseMode.HTML)
     
     async def handle_delete_time(self, client: Client, message: Message, state: dict):
         """Handle delete time input"""
+        delete_time_input = message.text.strip()
+
+        if delete_time_input.lower() == 'skip' and 'editing_job_id' in state:
+            state["step"] = "custom_caption"
+            self.db.save_user_state(message.from_user.id, state)
+            text = f"""✅ Delete time kept as <b>{state['delete_time']} minutes</b>.
+
+<b>Step 10:</b> Enter custom caption (optional).
+Or send `skip` to keep the current custom caption.
+            """
+            await message.reply_text(text, parse_mode=enums.ParseMode.HTML)
+            return
+
         try:
-            delete_time = int(message.text.strip())
+            delete_time = int(delete_time_input)
             if delete_time < 0 or delete_time > 10080:
                 raise ValueError()
         except ValueError:
@@ -1056,6 +1198,8 @@ You can use HTML formatting:
 
 Send <code>skip</code> to use original captions.
         """
+        if 'editing_job_id' in state:
+            text += "\nOr send `skip` to keep the current custom caption."
         
         await message.reply_text(text, parse_mode=enums.ParseMode.HTML)
     
@@ -1063,10 +1207,9 @@ Send <code>skip</code> to use original captions.
         """Handle custom caption input"""
         caption = message.text.strip()
         
-        if caption.lower() == "skip":
-            caption = ""
+        if caption.lower() != "skip":
+            state["custom_caption"] = caption
         
-        state["custom_caption"] = caption
         state["step"] = "button_text"
         self.db.save_user_state(message.from_user.id, state)
         
@@ -1076,6 +1219,8 @@ Send <code>skip</code> to use original captions.
 This will add an inline button to forwarded posts.
 Send <code>skip</code> to not add a button.
         """
+        if 'editing_job_id' in state:
+            text += "\nOr send `skip` to keep the current button text."
         
         await message.reply_text(text, parse_mode=enums.ParseMode.HTML)
     
@@ -1084,9 +1229,13 @@ Send <code>skip</code> to not add a button.
         button_text = message.text.strip()
         
         if button_text.lower() == "skip":
-            # Finalize job without button
-            await self.finalize_job(client, message, state)
-            return
+            if 'editing_job_id' in state:
+                await self.finalize_job(client, message, state)
+                return
+            else:
+                # Finalize job without button
+                await self.finalize_job(client, message, state)
+                return
         
         state["button_text"] = button_text
         state["step"] = "button_url"
@@ -1097,6 +1246,8 @@ Send <code>skip</code> to not add a button.
 <b>Step 12:</b> Enter button URL
 Example: <code>https://t.me/yourchannel</code>
         """
+        if 'editing_job_id' in state:
+            text += f"\nOr send `skip` to keep the current button URL: <code>{state['button_url']}</code>"
         
         await message.reply_text(text, parse_mode=enums.ParseMode.HTML)
     
@@ -1104,15 +1255,16 @@ Example: <code>https://t.me/yourchannel</code>
         """Handle button URL input"""
         button_url = message.text.strip()
         
-        if not button_url.startswith(('http://', 'https://', 'tg://')):
-            await message.reply_text("❌ Please enter a valid URL starting with http:// or https://")
-            return
-        
-        state["button_url"] = button_url
+        if button_url.lower() != 'skip':
+            if not button_url.startswith(('http://', 'https://', 'tg://')):
+                await message.reply_text("❌ Please enter a valid URL starting with http:// or https://")
+                return
+            state["button_url"] = button_url
+
         await self.finalize_job(client, message, state)
     
     async def finalize_job(self, client: Client, message: Message, state: dict):
-        """Finalize and create the job"""
+        """Finalize and create or update the job"""
         user_id = message.from_user.id
         
         job_data = {
@@ -1130,8 +1282,14 @@ Example: <code>https://t.me/yourchannel</code>
             'button_url': state.get('button_url', '')
         }
         
-        job_id = self.db.create_job(user_id, job_data)
-        
+        if "editing_job_id" in state:
+            job_id = state["editing_job_id"]
+            self.db.update_job(job_id, job_data)
+            action_text = "Updated"
+        else:
+            job_id = self.db.create_job(user_id, job_data)
+            action_text = "Created"
+
         # Clear user state
         self.db.clear_user_state(user_id)
         
@@ -1143,12 +1301,12 @@ Example: <code>https://t.me/yourchannel</code>
         delete_info = "Never delete" if job_data['delete_time'] == 0 else f"Delete after {job_data['delete_time']} min"
         end_info = "All future posts" if job_data['end_id'] == 999999 else str(job_data['end_id'])
         
-        text = f"""🎉 <b>Job Created Successfully!</b>
+        text = f"""🎉 <b>Job {action_text} Successfully!</b>
 
 <b>📋 Job Details:</b>
 • Name: <b>{job_data['name']}</b>
-• Source: <b>{state['source_info']['title']}</b>
-• Target: <b>{state['target_info']['title']}</b>
+• Source: <b>{state['source_channel']}</b>
+• Target: <b>{state['target_channel']}</b>
 • Posts Range: <b>{job_data['start_id']} - {end_info}</b>
 • Batch: <b>{job_data['batch_size']} posts every {job_data['recurring_time']} min</b>
 • Filter: <b>{job_data['filter_type'].title()}</b>
@@ -1183,6 +1341,10 @@ Ready to start forwarding!
                 await self.show_job_management(client, callback_query, job_id)
             elif action == "reset":
                 await self.reset_job_progress_action(client, callback_query, job_id)
+            elif action == "edit":
+                await self.start_job_editing(client, callback_query, job_id)
+            elif action == "delete":
+                await self.delete_job_action(client, callback_query, job_id)
             
         except Exception as e:
             logger.error(f"Error in job action: {e}")
@@ -1205,6 +1367,10 @@ Ready to start forwarding!
         
         keyboard.append([InlineKeyboardButton("🔄 Reset Progress", callback_data=f"job_reset_{job_id}")])
         keyboard.extend([
+            [
+                InlineKeyboardButton("✏️ Edit Job", callback_data=f"job_edit_{job_id}"),
+                InlineKeyboardButton("🗑️ Delete Job", callback_data=f"job_delete_{job_id}")
+            ],
             [InlineKeyboardButton("🔙 Back to Jobs", callback_data="my_jobs")]
         ])
         
@@ -1295,6 +1461,60 @@ Ready to start forwarding!
         # Optionally, navigate back to job management or my jobs
         await asyncio.sleep(2) # Give user time to read message
         await self.show_job_management(client, callback_query, job_id)
+
+    async def start_job_editing(self, client: Client, callback_query: CallbackQuery, job_id: int):
+        """Start the process of editing a job."""
+        user_id = callback_query.from_user.id
+        job = self.db.get_job(job_id)
+        if not job:
+            await callback_query.answer("❌ Job not found.", show_alert=True)
+            return
+
+        # Initialize user state for editing
+        state = {
+            "step": "job_name",
+            "editing_job_id": job_id,
+            "job_name": job['job_name'],
+            "source_channel": job['source_channel_id'],
+            "target_channel": job['target_channel_id'],
+            "start_post_id": job['start_post_id'],
+            "end_post_id": job['end_post_id'],
+            "batch_size": job['batch_size'],
+            "recurring_time": job['recurring_time'],
+            "delete_time": job['delete_time'],
+            "filter_type": job['filter_type'],
+            "custom_caption": job['custom_caption'],
+            "button_text": job['button_text'],
+            "button_url": job['button_url']
+        }
+        self.db.save_user_state(user_id, state)
+
+        text = f"""✏️ <b>Editing Job: {job['job_name']}</b>
+
+Send a new name for your job or send `skip` to keep the current name.
+Current name: <code>{job['job_name']}</code>
+        """
+        await callback_query.edit_message_text(text, parse_mode=enums.ParseMode.HTML)
+
+    async def delete_job_action(self, client: Client, callback_query: CallbackQuery, job_id: int):
+        """Handle deleting a job."""
+        job = self.db.get_job(job_id)
+        if not job:
+            await callback_query.answer("❌ Job not found.", show_alert=True)
+            return
+
+        if job['is_active']:
+            await callback_query.answer("⚠️ Please stop the job before deleting it.", show_alert=True)
+            return
+
+        self.db.delete_job(job_id)
+
+        await callback_query.edit_message_text(
+            f"🗑️ Job <b>{job['job_name']}</b> has been deleted.",
+            parse_mode=enums.ParseMode.HTML
+        )
+        await asyncio.sleep(2)
+        await self.show_user_jobs(client, callback_query)
     
     async def run_job(self, client: Client, job_id: int):
         """Main job execution loop"""
